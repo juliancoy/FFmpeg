@@ -297,10 +297,19 @@ int ff_vk_create_view(FFVulkanContext *s, FFVkVideoCommon *common,
     VkImageAspectFlags aspect_mask = ff_vk_aspect_bits_from_vkfmt(vkf);
     int is_video_dpb = usage & (VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
                                 VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR);
+    const int needs_ycbcr = (usage & VK_IMAGE_USAGE_SAMPLED_BIT) &&
+                            (aspect_mask & (VK_IMAGE_ASPECT_PLANE_0_BIT |
+                                            VK_IMAGE_ASPECT_PLANE_1_BIT |
+                                            VK_IMAGE_ASPECT_PLANE_2_BIT));
 
     VkImageViewUsageCreateInfo usage_create_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
         .usage = usage,
+    };
+    VkSamplerYcbcrConversionInfo ycbcr_info = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO,
+        .pNext = &usage_create_info,
+        .conversion = VK_NULL_HANDLE,
     };
     VkImageViewCreateInfo img_view_create_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -324,6 +333,41 @@ int ff_vk_create_view(FFVulkanContext *s, FFVkVideoCommon *common,
         },
     };
 
+    if (needs_ycbcr) {
+        if (common->ycbcr_conversion == VK_NULL_HANDLE || common->ycbcr_format != vkf) {
+            VkSamplerYcbcrConversionCreateInfo conv_info = {
+                .sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO,
+                .format = vkf,
+                .ycbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601,
+                .ycbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_NARROW,
+                .components = (VkComponentMapping) {
+                    .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                    .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+                },
+                .xChromaOffset = VK_CHROMA_LOCATION_MIDPOINT,
+                .yChromaOffset = VK_CHROMA_LOCATION_MIDPOINT,
+                .chromaFilter = VK_FILTER_NEAREST,
+                .forceExplicitReconstruction = VK_FALSE,
+            };
+            if (common->ycbcr_conversion != VK_NULL_HANDLE) {
+                vk->DestroySamplerYcbcrConversion(s->hwctx->act_dev,
+                                                  common->ycbcr_conversion,
+                                                  s->hwctx->alloc);
+                common->ycbcr_conversion = VK_NULL_HANDLE;
+                common->ycbcr_format = VK_FORMAT_UNDEFINED;
+            }
+            ret = vk->CreateSamplerYcbcrConversion(s->hwctx->act_dev, &conv_info,
+                                                   s->hwctx->alloc, &common->ycbcr_conversion);
+            if (ret != VK_SUCCESS)
+                return AVERROR_EXTERNAL;
+            common->ycbcr_format = vkf;
+        }
+        ycbcr_info.conversion = common->ycbcr_conversion;
+        img_view_create_info.pNext = &ycbcr_info;
+    }
+
     ret = vk->CreateImageView(s->hwctx->act_dev, &img_view_create_info,
                               s->hwctx->alloc, view);
     if (ret != VK_SUCCESS)
@@ -338,6 +382,14 @@ av_cold void ff_vk_video_common_uninit(FFVulkanContext *s,
                                        FFVkVideoCommon *common)
 {
     FFVulkanFunctions *vk = &s->vkfn;
+
+    if (common->ycbcr_conversion != VK_NULL_HANDLE) {
+        vk->DestroySamplerYcbcrConversion(s->hwctx->act_dev,
+                                          common->ycbcr_conversion,
+                                          s->hwctx->alloc);
+        common->ycbcr_conversion = VK_NULL_HANDLE;
+        common->ycbcr_format = VK_FORMAT_UNDEFINED;
+    }
 
     if (common->session) {
         vk->DestroyVideoSessionKHR(s->hwctx->act_dev, common->session,
@@ -371,6 +423,8 @@ av_cold int ff_vk_video_common_init(AVCodecContext *avctx, FFVulkanContext *s,
     FFVulkanFunctions *vk = &s->vkfn;
     VkVideoSessionMemoryRequirementsKHR *mem = NULL;
     VkBindVideoSessionMemoryInfoKHR *bind_mem = NULL;
+    common->ycbcr_conversion = VK_NULL_HANDLE;
+    common->ycbcr_format = VK_FORMAT_UNDEFINED;
 
     /* Create session */
     ret = vk->CreateVideoSessionKHR(s->hwctx->act_dev, session_create,

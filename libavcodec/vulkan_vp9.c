@@ -299,6 +299,16 @@ static int vk_vp9_start_frame(AVCodecContext          *avctx,
         },
     };
 
+    if (vp->ref_slot.pPictureResource &&
+        !(dec->shared_ctx->dec_caps.flags &
+          VK_VIDEO_DECODE_CAPABILITY_DPB_AND_OUTPUT_DISTINCT_BIT_KHR)) {
+        vp->decode_info.dstPictureResource.imageViewBinding =
+            vp->ref_slot.pPictureResource->imageViewBinding;
+        vp->decode_info.dstPictureResource.baseArrayLayer =
+            vp->ref_slot.pPictureResource->baseArrayLayer;
+        vp->ref_slot.pPictureResource = &vp->decode_info.dstPictureResource;
+    }
+
     ap->dec = dec;
 
     return 0;

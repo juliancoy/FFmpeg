@@ -363,6 +363,16 @@ static int vk_av1_start_frame(AVCodecContext          *avctx,
         },
     };
 
+    if (vp->ref_slot.pPictureResource &&
+        !(dec->shared_ctx->dec_caps.flags &
+          VK_VIDEO_DECODE_CAPABILITY_DPB_AND_OUTPUT_DISTINCT_BIT_KHR)) {
+        vp->decode_info.dstPictureResource.imageViewBinding =
+            vp->ref_slot.pPictureResource->imageViewBinding;
+        vp->decode_info.dstPictureResource.baseArrayLayer =
+            vp->ref_slot.pPictureResource->baseArrayLayer;
+        vp->ref_slot.pPictureResource = &vp->decode_info.dstPictureResource;
+    }
+
     ap->tile_info = (StdVideoAV1TileInfo) {
         .flags = (StdVideoAV1TileInfoFlags) {
             .uniform_tile_spacing_flag = frame_header->uniform_tile_spacing_flag,

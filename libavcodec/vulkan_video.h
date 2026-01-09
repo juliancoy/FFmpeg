@@ -39,6 +39,8 @@ typedef struct FFVkVideoSession {
     AVFrame *layered_frame;
     VkImageView layered_view;
     VkImageAspectFlags layered_aspect;
+    VkSamplerYcbcrConversion ycbcr_conversion;
+    VkFormat ycbcr_format;
 } FFVkVideoCommon;
 
 /**

@@ -3052,6 +3052,99 @@ static int vulkan_frames_init(AVHWFramesContext *hwfc)
                     hwctx->img_flags |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
             }
         }
+
+        if (hwctx->create_pnext &&
+            (p->vkctx.extensions & FF_VK_EXT_VIDEO_QUEUE)) {
+            const VkVideoProfileListInfoKHR *pl =
+                ff_vk_find_struct(hwctx->create_pnext,
+                                  VK_STRUCTURE_TYPE_VIDEO_PROFILE_LIST_INFO_KHR);
+            if (pl && pl->profileCount) {
+                const VkFormat desired_format =
+                    (hwctx->format[0] != VK_FORMAT_UNDEFINED) ? hwctx->format[0] : fmt->vkf;
+                VkPhysicalDeviceVideoFormatInfoKHR finfo = {
+                    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_FORMAT_INFO_KHR,
+                    .pNext = hwctx->create_pnext,
+                    .imageUsage = hwctx->usage,
+                };
+                VkImageUsageFlags decode_usage = hwctx->usage;
+                decode_usage &= ~(VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                  VK_IMAGE_USAGE_STORAGE_BIT);
+                decode_usage |= VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+                                VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR |
+                                VK_IMAGE_USAGE_SAMPLED_BIT;
+
+                fprintf(stderr,
+                        "[FFmpeg] Query video formats: desired_fmt=%d usage=0x%x tiling=%d\n",
+                        desired_format, (unsigned)hwctx->usage, hwctx->tiling);
+                uint32_t fmt_count = 0;
+                VkResult ret = vk->GetPhysicalDeviceVideoFormatPropertiesKHR(
+                    dev_hwctx->phys_dev, &finfo, &fmt_count, NULL);
+                if (ret != VK_SUCCESS || !fmt_count) {
+                    fprintf(stderr,
+                            "[FFmpeg] Video format query returned ret=%d count=%u\n",
+                            ret, fmt_count);
+                }
+                if (ret == VK_SUCCESS && !fmt_count && decode_usage != hwctx->usage) {
+                    fprintf(stderr,
+                            "[FFmpeg] Retrying video format query with reduced usage=0x%x\n",
+                            (unsigned)decode_usage);
+                    finfo.imageUsage = decode_usage;
+                    ret = vk->GetPhysicalDeviceVideoFormatPropertiesKHR(
+                        dev_hwctx->phys_dev, &finfo, &fmt_count, NULL);
+                    if (ret != VK_SUCCESS || !fmt_count) {
+                        fprintf(stderr,
+                                "[FFmpeg] Reduced usage query returned ret=%d count=%u\n",
+                                ret, fmt_count);
+                    } else {
+                        hwctx->usage = decode_usage;
+                    }
+                }
+                if (ret == VK_SUCCESS && fmt_count) {
+                    VkVideoFormatPropertiesKHR *props =
+                        av_mallocz(sizeof(*props) * fmt_count);
+                    if (!props)
+                        goto img_flags_done;
+                    for (uint32_t i = 0; i < fmt_count; ++i)
+                        props[i].sType = VK_STRUCTURE_TYPE_VIDEO_FORMAT_PROPERTIES_KHR;
+                    ret = vk->GetPhysicalDeviceVideoFormatPropertiesKHR(
+                        dev_hwctx->phys_dev, &finfo, &fmt_count, props);
+                    if (ret == VK_SUCCESS) {
+                        fprintf(stderr,
+                                "[FFmpeg] Video format properties for profile list (count=%u):\n",
+                                fmt_count);
+                        for (uint32_t i = 0; i < fmt_count; ++i) {
+                            fprintf(stderr,
+                                    "  fmt=%d createFlags=0x%x usageFlags=0x%x type=%d tiling=%d\n",
+                                    props[i].format,
+                                    (unsigned)props[i].imageCreateFlags,
+                                    (unsigned)props[i].imageUsageFlags,
+                                    props[i].imageType,
+                                    props[i].imageTiling);
+                        }
+                        for (uint32_t i = 0; i < fmt_count; ++i) {
+                            if (props[i].format == desired_format) {
+                                hwctx->img_flags = props[i].imageCreateFlags;
+                                av_free(props);
+                                goto img_flags_done;
+                            }
+                        }
+                    }
+                    av_free(props);
+                }
+            }
+        }
+img_flags_done:
+    }
+
+    if (hwctx->create_pnext && (p->vkctx.extensions & FF_VK_EXT_VIDEO_QUEUE)) {
+        if (!is_lone_dpb) {
+            hwctx->usage |= VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+                            VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
+        }
+        fprintf(stderr,
+                "[FFmpeg] Final decode image usage=0x%x flags=0x%x (lone_dpb=%d)\n",
+                (unsigned)hwctx->usage, (unsigned)hwctx->img_flags, is_lone_dpb);
     }
 
     /* If the image has an ENCODE_SRC usage, and the maintenance1
@@ -3099,6 +3192,16 @@ static int vulkan_frames_init(AVHWFramesContext *hwfc)
         return err;
 
     /* Test to see if allocation will fail */
+    if (hwctx->create_pnext && (p->vkctx.extensions & FF_VK_EXT_VIDEO_QUEUE)) {
+        if (!is_lone_dpb) {
+            hwctx->usage |= VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+                            VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
+        }
+        fprintf(stderr,
+                "[FFmpeg] Final decode image usage=0x%x flags=0x%x\n",
+                (unsigned)hwctx->usage, (unsigned)hwctx->img_flags);
+    }
+
     err = create_frame(hwfc, &f, hwctx->tiling, hwctx->usage, hwctx->img_flags,
                        hwctx->nb_layers, hwctx->create_pnext);
     if (err)

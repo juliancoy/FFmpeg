@@ -228,12 +228,14 @@ int ff_vk_decode_prepare_frame(FFVulkanDecodeContext *dec, AVFrame *pic,
         AVHWFramesContext *frames = (AVHWFramesContext *)pic->hw_frames_ctx->data;
         AVVulkanFramesContext *hwfc = frames->hwctx;
 
+        VkImageUsageFlags out_usage = VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR;
+        if (!dec->dedicated_dpb)
+            out_usage |= VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
         err = ff_vk_create_view(&ctx->s, &ctx->common,
                                 &vkpic->view.out[0], &vkpic->view.aspect[0],
                                 (AVVkFrame *)pic->data[0],
                                 hwfc->format[0],
-                                VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
-                                (!is_current ? VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR : 0));
+                                out_usage);
         if (err < 0)
             return err;
 
@@ -1043,8 +1045,13 @@ static int vulkan_decode_get_profile(AVCodecContext *avctx, AVBufferRef *frames_
     }
 
     dec->dedicated_dpb = !(dec_caps->flags & VK_VIDEO_DECODE_CAPABILITY_DPB_AND_OUTPUT_COINCIDE_BIT_KHR);
-    ctx->common.layered_dpb = !dec->dedicated_dpb ? 0 :
-                              !(caps->flags & VK_VIDEO_CAPABILITY_SEPARATE_REFERENCE_IMAGES_BIT_KHR);
+    if (!(caps->flags & VK_VIDEO_CAPABILITY_SEPARATE_REFERENCE_IMAGES_BIT_KHR)) {
+        /* Driver requires all reference slots to use the same image. */
+        dec->dedicated_dpb = 1;
+        ctx->common.layered_dpb = 1;
+    } else {
+        ctx->common.layered_dpb = !dec->dedicated_dpb ? 0 : 0;
+    }
 
     if (dec->dedicated_dpb) {
         fmt_info.imageUsage = VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
@@ -1386,6 +1393,9 @@ int ff_vk_decode_init(AVCodecContext *avctx)
         dpb_hwfc->format[0]    = s->hwfc->format[0];
         dpb_hwfc->tiling       = VK_IMAGE_TILING_OPTIMAL;
         dpb_hwfc->usage        = VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR;
+        if (!(ctx->dec_caps.flags &
+              VK_VIDEO_DECODE_CAPABILITY_DPB_AND_OUTPUT_DISTINCT_BIT_KHR))
+            dpb_hwfc->usage   |= VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR;
 
         if (ctx->common.layered_dpb)
             dpb_hwfc->nb_layers = ctx->caps.maxDpbSlots;
@@ -1405,7 +1415,7 @@ int ff_vk_decode_init(AVCodecContext *avctx)
                                     &ctx->common.layered_view,
                                     &ctx->common.layered_aspect,
                                     (AVVkFrame *)ctx->common.layered_frame->data[0],
-                                    s->hwfc->format[0], VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR);
+                                    s->hwfc->format[0], dpb_hwfc->usage);
             if (err < 0)
                 goto fail;
         }
